@@ -7,6 +7,7 @@
   <title>PLASTIC GEORGIA • Scanner</title>
 
   <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 
   <style>
     * {
@@ -476,6 +477,9 @@ let scanner = null;
 let scannerRunning = false;
 
 let scannerLocked = false;
+let manualScanTimer = null;
+let manualScanCanvas = null;
+let manualScanContext = null;
 
 let currentProduct = null;
 
@@ -492,84 +496,40 @@ async function startScanner() {
     return;
   }
 
-  document
-    .getElementById('scannerArea')
-    .classList.remove('hidden');
-
-  document
-    .getElementById('scanStatus')
-    .textContent =
-    'კამერის ჩართვა...';
-
+  document.getElementById('scannerArea').classList.remove('hidden');
+  document.getElementById('scanStatus').textContent = 'კამერის ჩართვა...';
 
   try {
 
-    if (
-      typeof Html5Qrcode ===
-      'undefined'
-    ) {
-
-      throw new Error(
-        'QR ბიბლიოთეკა ვერ ჩაიტვირთა.'
-      );
-
+    if (typeof Html5Qrcode === 'undefined') {
+      throw new Error('QR ბიბლიოთეკა ვერ ჩაიტვირთა.');
     }
-
 
     if (scanner) {
-
-      try {
-        await scanner.stop();
-      } catch (e) {}
-
-      try {
-        scanner.clear();
-      } catch (e) {}
-
+      try { await scanner.stop(); } catch (e) {}
+      try { scanner.clear(); } catch (e) {}
     }
 
+    stopManualScanner();
 
-    scanner = new Html5Qrcode('reader', {
-      verbose: false
-    });
-
+    scanner = new Html5Qrcode('reader', { verbose: false });
 
     await scanner.start(
-
       {
-        facingMode: {
-          ideal: 'environment'
-        }
+        facingMode: { ideal: 'environment' }
       },
-
       {
-        // უფრო ხშირი სკანირება
-        fps: 10,
+        fps: 20,
 
-        // მაქსიმალურად მაღალი კამერის ხარისხი, 
         videoConstraints: {
-          facingMode: {
-            ideal: 'environment'
-          },
-          width: {
-            ideal: 1920
-          },
-          height: {
-            ideal: 1080
-          }
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
         },
 
-        // QR-ის მოსაძებნად კამერის გამოსახულების დიდი ნაწილი გამოიყენება
         qrbox: function(viewfinderWidth, viewfinderHeight) {
-
-          const minEdge = Math.min(
-            viewfinderWidth,
-            viewfinderHeight
-          );
-
-          const size = Math.floor(
-            minEdge * 0.88
-          );
+          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
+          const size = Math.floor(minEdge * 0.90);
 
           return {
             width: size,
@@ -577,48 +537,33 @@ async function startScanner() {
           };
         },
 
-        // კამერის პროპორციების მორგება
         aspectRatio: 1.7777778,
-
-        // სარკისებური გამოსახულების გარეშე
         disableFlip: false
-
       },
 
       function(decodedText) {
-
-        handleScan(
-          decodedText
-        );
-
+        handleScan(decodedText);
       },
 
       function() {}
-
     );
-
 
     scannerRunning = true;
 
-    document
-      .getElementById('scanStatus')
-      .textContent =
-      'მოათავსე QR კოდი ჩარჩოში.';
+    document.getElementById('scanStatus').textContent =
+      'მოათავსე QR კამერაში. დამატებითი დაბალი ხარისხის სკანერიც მუშაობს...';
 
+    startManualScanner();
 
   } catch (error) {
 
     scannerRunning = false;
 
-    document
-      .getElementById('scanStatus')
-      .textContent =
+    document.getElementById('scanStatus').textContent =
       'კამერა ვერ ჩაირთო. შეამოწმე კამერის უფლება.';
 
     console.error(error);
-
   }
-
 }
 
 
@@ -629,23 +574,180 @@ async function startScanner() {
 async function stopScanner() {
 
   scannerRunning = false;
-
   scannerLocked = false;
 
+  stopManualScanner();
+
   if (scanner) {
-
-    try {
-      await scanner.stop();
-    } catch (e) {}
-
-    try {
-      scanner.clear();
-    } catch (e) {}
-
+    try { await scanner.stop(); } catch (e) {}
+    try { scanner.clear(); } catch (e) {}
   }
 
   scanner = null;
+}
 
+
+
+/* =====================================================
+   EXTRA LOW-QUALITY QR DECODER
+   ===================================================== */
+
+function startManualScanner() {
+
+  stopManualScanner();
+
+  if (typeof jsQR === 'undefined') {
+    console.warn('jsQR fallback ვერ ჩაიტვირთა.');
+    return;
+  }
+
+  manualScanCanvas = document.createElement('canvas');
+
+  manualScanContext = manualScanCanvas.getContext(
+    '2d',
+    { willReadFrequently: true }
+  );
+
+  manualScanTimer = setInterval(
+    manualDecodeFrame,
+    150
+  );
+}
+
+
+function stopManualScanner() {
+
+  if (manualScanTimer) {
+    clearInterval(manualScanTimer);
+  }
+
+  manualScanTimer = null;
+  manualScanCanvas = null;
+  manualScanContext = null;
+}
+
+
+function manualDecodeFrame() {
+
+  if (!scannerRunning || scannerLocked) {
+    return;
+  }
+
+  const reader = document.getElementById('reader');
+
+  if (!reader || !manualScanContext) {
+    return;
+  }
+
+  const video = reader.querySelector('video');
+
+  if (
+    !video ||
+    video.readyState < 2 ||
+    !video.videoWidth ||
+    !video.videoHeight
+  ) {
+    return;
+  }
+
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+
+  const maxSize = 1600;
+  const scale = Math.min(
+    1,
+    maxSize / Math.max(vw, vh)
+  );
+
+  const w = Math.max(640, Math.floor(vw * scale));
+  const h = Math.max(480, Math.floor(vh * scale));
+
+  manualScanCanvas.width = w;
+  manualScanCanvas.height = h;
+
+  const ctx = manualScanContext;
+
+  // 1) ორიგინალი კადრი
+  ctx.filter = 'none';
+  ctx.drawImage(video, 0, 0, w, h);
+
+  let image = ctx.getImageData(0, 0, w, h);
+
+  let result = jsQR(
+    image.data,
+    image.width,
+    image.height,
+    { inversionAttempts: 'attemptBoth' }
+  );
+
+  if (result && result.data) {
+    handleScan(result.data);
+    return;
+  }
+
+  // 2) გაძლიერებული კონტრასტი
+  enhanceCanvasForQr(image, false);
+
+  result = jsQR(
+    image.data,
+    image.width,
+    image.height,
+    { inversionAttempts: 'attemptBoth' }
+  );
+
+  if (result && result.data) {
+    handleScan(result.data);
+    return;
+  }
+
+  // 3) მკაცრი შავ-თეთრი threshold
+  enhanceCanvasForQr(image, true);
+
+  result = jsQR(
+    image.data,
+    image.width,
+    image.height,
+    { inversionAttempts: 'attemptBoth' }
+  );
+
+  if (result && result.data) {
+    handleScan(result.data);
+  }
+}
+
+
+function enhanceCanvasForQr(image, hardThreshold) {
+
+  const data = image.data;
+
+  for (let i = 0; i < data.length; i += 4) {
+
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+
+    let gray =
+      (0.299 * r) +
+      (0.587 * g) +
+      (0.114 * b);
+
+    gray =
+      ((gray - 128) * 1.65) +
+      128;
+
+    gray = Math.max(
+      0,
+      Math.min(255, gray)
+    );
+
+    if (hardThreshold) {
+      gray = gray < 150 ? 0 : 255;
+    }
+
+    data[i] = gray;
+    data[i + 1] = gray;
+    data[i + 2] = gray;
+  }
 }
 
 
