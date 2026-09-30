@@ -6,7 +6,6 @@
 
   <title>PLASTIC GEORGIA • Scanner</title>
 
-  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 
   <style>
@@ -104,6 +103,28 @@
       border-radius: 14px;
       background: #000;
       margin-top: 12px;
+      position: relative;
+      min-height: 300px;
+    }
+
+    #cameraVideo {
+      display: block;
+      width: 100%;
+      height: auto;
+      min-height: 300px;
+      object-fit: cover;
+      background: #000;
+    }
+
+    #scanGuide {
+      position: absolute;
+      left: 5%;
+      top: 10%;
+      width: 90%;
+      height: 80%;
+      border: 2px solid rgba(255,255,255,.85);
+      border-radius: 12px;
+      pointer-events: none;
     }
 
     .status {
@@ -215,7 +236,10 @@
       id="scannerArea"
       class="hidden">
 
-      <div id="reader"></div>
+      <div id="reader">
+        <video id="cameraVideo" playsinline autoplay muted></video>
+        <div id="scanGuide"></div>
+      </div>
 
       <div
         id="scanStatus"
@@ -473,14 +497,12 @@ const API_URL =
    ===================================================== */
 
 let scanner = null;
-
+let scannerStream = null;
 let scannerRunning = false;
-
 let scannerLocked = false;
-let manualScanTimer = null;
-let manualScanCanvas = null;
-let manualScanContext = null;
-
+let scannerFrameTimer = null;
+let scannerCanvas = null;
+let scannerContext = null;
 let currentProduct = null;
 
 let cart = [];
@@ -496,150 +518,192 @@ async function startScanner() {
     return;
   }
 
-  document.getElementById('scannerArea').classList.remove('hidden');
-  document.getElementById('scanStatus').textContent = 'კამერის ჩართვა...';
+  document
+    .getElementById('scannerArea')
+    .classList.remove('hidden');
+
+  document
+    .getElementById('scanStatus')
+    .textContent =
+    'კამერის ჩართვა...';
 
   try {
 
-    if (typeof Html5Qrcode === 'undefined') {
-      throw new Error('QR ბიბლიოთეკა ვერ ჩაიტვირთა.');
+    stopScanner();
+
+    if (!navigator.mediaDevices ||
+        !navigator.mediaDevices.getUserMedia) {
+      throw new Error('კამერა ამ ბრაუზერში მიუწვდომელია.');
     }
 
-    if (scanner) {
-      try { await scanner.stop(); } catch (e) {}
-      try { scanner.clear(); } catch (e) {}
-    }
+    const video =
+      document.getElementById('cameraVideo');
 
-    stopManualScanner();
+    // მაქსიმალურად მაღალი რეალური კამერის რეჟიმი.
+    scannerStream =
+      await navigator.mediaDevices.getUserMedia({
 
-    scanner = new Html5Qrcode('reader', { verbose: false });
+        audio: false,
 
-    await scanner.start(
-      {
-        facingMode: { ideal: 'environment' }
-      },
-      {
-        fps: 20,
+        video: {
+          facingMode: {
+            ideal: 'environment'
+          },
 
-        videoConstraints: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        },
+          width: {
+            ideal: 1920,
+            min: 1280
+          },
 
-        qrbox: function(viewfinderWidth, viewfinderHeight) {
-          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-          const size = Math.floor(minEdge * 0.90);
+          height: {
+            ideal: 1080,
+            min: 720
+          },
 
-          return {
-            width: size,
-            height: size
-          };
-        },
+          frameRate: {
+            ideal: 30,
+            min: 15
+          }
+        }
 
-        aspectRatio: 1.7777778,
-        disableFlip: false
-      },
+      });
 
-      function(decodedText) {
-        handleScan(decodedText);
-      },
+    video.srcObject = scannerStream;
 
-      function() {}
-    );
+    await video.play();
 
     scannerRunning = true;
+    scannerLocked = false;
 
-    document.getElementById('scanStatus').textContent =
-      'მოათავსე QR კამერაში. დამატებითი დაბალი ხარისხის სკანერიც მუშაობს...';
+    scannerCanvas =
+      document.createElement('canvas');
 
-    startManualScanner();
+    scannerContext =
+      scannerCanvas.getContext(
+        '2d',
+        {
+          willReadFrequently: true
+        }
+      );
+
+    // კამერის optical/digital zoom თუ მოწყობილობა იძლევა.
+    await enableBestCameraSettings();
+
+    document
+      .getElementById('scanStatus')
+      .textContent =
+      'მიმართე QR-ს კამერაზე. ავტომატურად ვცდილობ რამდენიმე ხარისხის რეჟიმს...';
+
+    startFrameScanning();
 
   } catch (error) {
 
     scannerRunning = false;
 
-    document.getElementById('scanStatus').textContent =
+    document
+      .getElementById('scanStatus')
+      .textContent =
       'კამერა ვერ ჩაირთო. შეამოწმე კამერის უფლება.';
 
     console.error(error);
+
   }
 }
 
 
-/* =====================================================
-   STOP
-   ===================================================== */
+async function enableBestCameraSettings() {
 
-async function stopScanner() {
-
-  scannerRunning = false;
-  scannerLocked = false;
-
-  stopManualScanner();
-
-  if (scanner) {
-    try { await scanner.stop(); } catch (e) {}
-    try { scanner.clear(); } catch (e) {}
-  }
-
-  scanner = null;
-}
-
-
-
-/* =====================================================
-   EXTRA LOW-QUALITY QR DECODER
-   ===================================================== */
-
-function startManualScanner() {
-
-  stopManualScanner();
-
-  if (typeof jsQR === 'undefined') {
-    console.warn('jsQR fallback ვერ ჩაიტვირთა.');
+  if (!scannerStream) {
     return;
   }
 
-  manualScanCanvas = document.createElement('canvas');
+  const track =
+    scannerStream.getVideoTracks()[0];
 
-  manualScanContext = manualScanCanvas.getContext(
-    '2d',
-    { willReadFrequently: true }
-  );
-
-  manualScanTimer = setInterval(
-    manualDecodeFrame,
-    150
-  );
-}
-
-
-function stopManualScanner() {
-
-  if (manualScanTimer) {
-    clearInterval(manualScanTimer);
-  }
-
-  manualScanTimer = null;
-  manualScanCanvas = null;
-  manualScanContext = null;
-}
-
-
-function manualDecodeFrame() {
-
-  if (!scannerRunning || scannerLocked) {
+  if (!track) {
     return;
   }
 
-  const reader = document.getElementById('reader');
+  try {
 
-  if (!reader || !manualScanContext) {
+    const capabilities =
+      track.getCapabilities();
+
+    const advanced = {};
+
+    // მაქსიმალური zoom — მხოლოდ თუ კამერა უჭერს მხარს.
+    if (
+      capabilities.zoom &&
+      typeof capabilities.zoom.max === 'number'
+    ) {
+
+      advanced.zoom =
+        Math.min(
+          capabilities.zoom.max,
+          Math.max(
+            capabilities.zoom.min || 1,
+            2
+          )
+        );
+    }
+
+    // მაქსიმალური focus distance არ ვეხებით,
+    // რადგან ზოგიერთ ტელეფონზე ხელით focus-ის ჩართვა აფუჭებს autofocus-ს.
+
+    if (Object.keys(advanced).length) {
+      await track.applyConstraints({
+        advanced: [advanced]
+      });
+    }
+
+  } catch (e) {
+    console.warn(
+      'კამერის დამატებითი პარამეტრები ვერ დაყენდა:',
+      e
+    );
+  }
+}
+
+
+function startFrameScanning() {
+
+  stopFrameScanning();
+
+  scannerFrameTimer =
+    setInterval(
+      scanCameraFrame,
+      100
+    );
+}
+
+
+function stopFrameScanning() {
+
+  if (scannerFrameTimer) {
+    clearInterval(
+      scannerFrameTimer
+    );
+  }
+
+  scannerFrameTimer = null;
+}
+
+
+function scanCameraFrame() {
+
+  if (
+    !scannerRunning ||
+    scannerLocked ||
+    !scannerContext ||
+    !scannerCanvas
+  ) {
     return;
   }
 
-  const video = reader.querySelector('video');
+  const video =
+    document.getElementById(
+      'cameraVideo'
+    );
 
   if (
     !video ||
@@ -653,78 +717,223 @@ function manualDecodeFrame() {
   const vw = video.videoWidth;
   const vh = video.videoHeight;
 
-  const maxSize = 1600;
-  const scale = Math.min(
-    1,
-    maxSize / Math.max(vw, vh)
-  );
+  /*
+   * 4 სხვადასხვა crop:
+   * 1. სრული კადრი
+   * 2. ცენტრალური 90%
+   * 3. ცენტრალური 70%
+   * 4. ცენტრალური 55%
+   *
+   * ეს ზრდის შანსს, რომ დაბეჭდილი QR
+   * საკმარისი პიქსელებით მოხვდეს decoder-ში.
+   */
 
-  const w = Math.max(640, Math.floor(vw * scale));
-  const h = Math.max(480, Math.floor(vh * scale));
+  const regions = [
+    {
+      x: 0,
+      y: 0,
+      w: vw,
+      h: vh
+    },
+    {
+      x: vw * 0.05,
+      y: vh * 0.05,
+      w: vw * 0.90,
+      h: vh * 0.90
+    },
+    {
+      x: vw * 0.15,
+      y: vh * 0.15,
+      w: vw * 0.70,
+      h: vh * 0.70
+    },
+    {
+      x: vw * 0.225,
+      y: vh * 0.225,
+      w: vw * 0.55,
+      h: vh * 0.55
+    }
+  ];
 
-  manualScanCanvas.width = w;
-  manualScanCanvas.height = h;
+  for (
+    let i = 0;
+    i < regions.length;
+    i++
+  ) {
 
-  const ctx = manualScanContext;
+    if (
+      !scannerRunning ||
+      scannerLocked
+    ) {
+      return;
+    }
 
-  // 1) ორიგინალი კადრი
-  ctx.filter = 'none';
-  ctx.drawImage(video, 0, 0, w, h);
+    const r =
+      regions[i];
 
-  let image = ctx.getImageData(0, 0, w, h);
+    // decoder-ისთვის ვზრდით კადრს.
+    const maxOutput = 1800;
 
-  let result = jsQR(
-    image.data,
-    image.width,
-    image.height,
-    { inversionAttempts: 'attemptBoth' }
-  );
+    const scale =
+      Math.min(
+        1.5,
+        maxOutput /
+          Math.max(
+            r.w,
+            r.h
+          )
+      );
 
-  if (result && result.data) {
-    handleScan(result.data);
-    return;
-  }
+    const outW =
+      Math.max(
+        800,
+        Math.floor(
+          r.w * scale
+        )
+      );
 
-  // 2) გაძლიერებული კონტრასტი
-  enhanceCanvasForQr(image, false);
+    const outH =
+      Math.max(
+        600,
+        Math.floor(
+          r.h * scale
+        )
+      );
 
-  result = jsQR(
-    image.data,
-    image.width,
-    image.height,
-    { inversionAttempts: 'attemptBoth' }
-  );
+    scannerCanvas.width = outW;
+    scannerCanvas.height = outH;
 
-  if (result && result.data) {
-    handleScan(result.data);
-    return;
-  }
+    scannerContext
+      .drawImage(
+        video,
+        r.x,
+        r.y,
+        r.w,
+        r.h,
+        0,
+        0,
+        outW,
+        outH
+      );
 
-  // 3) მკაცრი შავ-თეთრი threshold
-  enhanceCanvasForQr(image, true);
+    let image =
+      scannerContext.getImageData(
+        0,
+        0,
+        outW,
+        outH
+      );
 
-  result = jsQR(
-    image.data,
-    image.width,
-    image.height,
-    { inversionAttempts: 'attemptBoth' }
-  );
+    // Pass 1 — original
+    let result =
+      decodeJsQr(
+        image
+      );
 
-  if (result && result.data) {
-    handleScan(result.data);
+    if (result) {
+      handleScan(
+        result
+      );
+      return;
+    }
+
+    // Pass 2 — contrast
+    enhanceQrImage(
+      image,
+      1.8,
+      false
+    );
+
+    result =
+      decodeJsQr(
+        image
+      );
+
+    if (result) {
+      handleScan(
+        result
+      );
+      return;
+    }
+
+    // Pass 3 — threshold
+    enhanceQrImage(
+      image,
+      2.2,
+      true
+    );
+
+    result =
+      decodeJsQr(
+        image
+      );
+
+    if (result) {
+      handleScan(
+        result
+      );
+      return;
+    }
   }
 }
 
 
-function enhanceCanvasForQr(image, hardThreshold) {
+function decodeJsQr(image) {
 
-  const data = image.data;
+  if (
+    typeof jsQR === 'undefined'
+  ) {
+    return null;
+  }
 
-  for (let i = 0; i < data.length; i += 4) {
+  try {
 
-    const r = data[i];
-    const g = data[i + 1];
-    const b = data[i + 2];
+    const result =
+      jsQR(
+        image.data,
+        image.width,
+        image.height,
+        {
+          inversionAttempts:
+            'attemptBoth'
+        }
+      );
+
+    return result &&
+      result.data
+      ? result.data
+      : null;
+
+  } catch (e) {
+
+    return null;
+  }
+}
+
+
+function enhanceQrImage(
+  image,
+  contrast,
+  hardThreshold
+) {
+
+  const data =
+    image.data;
+
+  for (
+    let i = 0;
+    i < data.length;
+    i += 4
+  ) {
+
+    const r =
+      data[i];
+
+    const g =
+      data[i + 1];
+
+    const b =
+      data[i + 2];
 
     let gray =
       (0.299 * r) +
@@ -732,22 +941,80 @@ function enhanceCanvasForQr(image, hardThreshold) {
       (0.114 * b);
 
     gray =
-      ((gray - 128) * 1.65) +
+      ((gray - 128) *
+        contrast) +
       128;
 
-    gray = Math.max(
-      0,
-      Math.min(255, gray)
-    );
+    gray =
+      Math.max(
+        0,
+        Math.min(
+          255,
+          gray
+        )
+      );
 
     if (hardThreshold) {
-      gray = gray < 150 ? 0 : 255;
+
+      gray =
+        gray < 145
+          ? 0
+          : 255;
     }
 
-    data[i] = gray;
-    data[i + 1] = gray;
-    data[i + 2] = gray;
+    data[i] =
+      gray;
+
+    data[i + 1] =
+      gray;
+
+    data[i + 2] =
+      gray;
   }
+}
+
+
+/* =====================================================
+   STOP
+   ===================================================== */
+
+async function stopScanner() {
+
+  scannerRunning = false;
+  scannerLocked = false;
+
+  stopFrameScanning();
+
+  if (scannerStream) {
+
+    scannerStream
+      .getTracks()
+      .forEach(
+        function(track) {
+          try {
+            track.stop();
+          } catch (e) {}
+        }
+      );
+  }
+
+  scannerStream = null;
+
+  const video =
+    document.getElementById(
+      'cameraVideo'
+    );
+
+  if (video) {
+    try {
+      video.pause();
+    } catch (e) {}
+
+    video.srcObject = null;
+  }
+
+  scannerCanvas = null;
+  scannerContext = null;
 }
 
 
