@@ -586,13 +586,18 @@ async function startScanner() {
         }
       );
 
-    // კამერის optical/digital zoom თუ მოწყობილობა იძლევა.
+    // autofocus / zoom / exposure-ის მაქსიმალურად კარგი რეჟიმი
     await enableBestCameraSettings();
+
+    // autofocus-ის ხელახლა მოთხოვნა რამდენიმე ეტაპად,
+    // რადგან ზოგიერთ Android/iPhone ბრაუზერს კამერის ჩართვის
+    // პირველივე წამზე focus constraint არ მიაქვს.
+    await forceContinuousFocus();
 
     document
       .getElementById('scanStatus')
       .textContent =
-      'მიმართე QR-ს კამერაზე. ავტომატურად ვცდილობ რამდენიმე ხარისხის რეჟიმს...';
+      'მიმართე QR-ს კამერაზე — ავტოფოკუსი ავტომატურად ჩაირთვება...';
 
     startFrameScanning();
 
@@ -631,37 +636,255 @@ async function enableBestCameraSettings() {
 
     const advanced = {};
 
-    // მაქსიმალური zoom — მხოლოდ თუ კამერა უჭერს მხარს.
+    // Continuous autofocus.
+    if (
+      capabilities.focusMode &&
+      Array.isArray(capabilities.focusMode)
+    ) {
+
+      if (
+        capabilities.focusMode.includes(
+          'continuous'
+        )
+      ) {
+
+        advanced.focusMode =
+          'continuous';
+
+      } else if (
+        capabilities.focusMode.includes(
+          'auto'
+        )
+      ) {
+
+        advanced.focusMode =
+          'auto';
+      }
+    }
+
+    // Continuous exposure / white balance, თუ მხარდაჭერილია.
+    if (
+      capabilities.exposureMode &&
+      Array.isArray(capabilities.exposureMode) &&
+      capabilities.exposureMode.includes(
+        'continuous'
+      )
+    ) {
+
+      advanced.exposureMode =
+        'continuous';
+    }
+
+    if (
+      capabilities.whiteBalanceMode &&
+      Array.isArray(capabilities.whiteBalanceMode) &&
+      capabilities.whiteBalanceMode.includes(
+        'continuous'
+      )
+    ) {
+
+      advanced.whiteBalanceMode =
+        'continuous';
+    }
+
+    // ზომიერი zoom — QR უფრო დიდი ხდება,
+    // მაგრამ ძალიან ახლოს არ მიაქვს.
     if (
       capabilities.zoom &&
       typeof capabilities.zoom.max === 'number'
     ) {
 
-      advanced.zoom =
+      const minZoom =
+        typeof capabilities.zoom.min === 'number'
+          ? capabilities.zoom.min
+          : 1;
+
+      const maxZoom =
+        capabilities.zoom.max;
+
+      const targetZoom =
         Math.min(
-          capabilities.zoom.max,
+          maxZoom,
           Math.max(
-            capabilities.zoom.min || 1,
-            2
+            minZoom,
+            Math.min(
+              2.0,
+              maxZoom
+            )
           )
         );
+
+      advanced.zoom =
+        targetZoom;
     }
 
-    // მაქსიმალური focus distance არ ვეხებით,
-    // რადგან ზოგიერთ ტელეფონზე ხელით focus-ის ჩართვა აფუჭებს autofocus-ს.
+    if (
+      Object.keys(advanced).length
+    ) {
 
-    if (Object.keys(advanced).length) {
-      await track.applyConstraints({
-        advanced: [advanced]
-      });
+      try {
+
+        await track.applyConstraints({
+          advanced: [
+            advanced
+          ]
+        });
+
+      } catch (e) {
+
+        console.warn(
+          'advanced camera constraints ვერ დაყენდა:',
+          e
+        );
+
+        // fallback — პირდაპირ ძირითადი constraints
+        try {
+
+          await track.applyConstraints(
+            advanced
+          );
+
+        } catch (e2) {
+
+          console.warn(
+            'camera constraints fallback-იც ვერ დაყენდა:',
+            e2
+          );
+        }
+      }
     }
 
   } catch (e) {
+
     console.warn(
-      'კამერის დამატებითი პარამეტრები ვერ დაყენდა:',
+      'კამერის capabilities ვერ წავიკითხე:',
       e
     );
   }
+}
+
+
+async function forceContinuousFocus() {
+
+  if (!scannerStream) {
+    return;
+  }
+
+  const track =
+    scannerStream.getVideoTracks()[0];
+
+  if (!track) {
+    return;
+  }
+
+  try {
+
+    const capabilities =
+      track.getCapabilities();
+
+    if (
+      capabilities.focusMode &&
+      Array.isArray(
+        capabilities.focusMode
+      )
+    ) {
+
+      if (
+        capabilities.focusMode.includes(
+          'continuous'
+        )
+      ) {
+
+        await track.applyConstraints({
+          advanced: [
+            {
+              focusMode:
+                'continuous'
+            }
+          ]
+        });
+
+        return;
+      }
+
+      if (
+        capabilities.focusMode.includes(
+          'auto'
+        )
+      ) {
+
+        await track.applyConstraints({
+          advanced: [
+            {
+              focusMode:
+                'auto'
+            }
+          ]
+        });
+      }
+    }
+
+  } catch (e) {
+
+    console.warn(
+      'autofocus ვერ ჩაირთო:',
+      e
+    );
+  }
+
+  /*
+   * ზოგიერთ ტელეფონზე autofocus მხოლოდ
+   * კამერის ხელახლა მოთხოვნისას აქტიურდება.
+   * ამიტომ პატარა delay-ის შემდეგ კიდევ ერთხელ
+   * ვთხოვთ continuous focus-ს.
+   */
+  setTimeout(
+    async function() {
+
+      if (
+        !scannerRunning ||
+        !scannerStream
+      ) {
+        return;
+      }
+
+      try {
+
+        const currentTrack =
+          scannerStream.getVideoTracks()[0];
+
+        if (!currentTrack) {
+          return;
+        }
+
+        const caps =
+          currentTrack.getCapabilities();
+
+        if (
+          caps.focusMode &&
+          Array.isArray(
+            caps.focusMode
+          ) &&
+          caps.focusMode.includes(
+            'continuous'
+          )
+        ) {
+
+          await currentTrack.applyConstraints({
+            advanced: [
+              {
+                focusMode:
+                  'continuous'
+              }
+            ]
+          });
+        }
+
+      } catch (e) {}
+
+    },
+    1200
+  );
 }
 
 
