@@ -1527,10 +1527,18 @@ function callApi(
   callback
 ) {
 
+  /*
+    Google Apps Script ContentService-ს სჭირდება JSONP,
+    რადგან GitHub Pages და Apps Script სხვადასხვა origin-ზეა.
+
+    Callback-ის სახელს განზრახ ვიყენებთ მხოლოდ ასოებისა და
+    ციფრებისგან, რათა Apps Script-ის callback sanitizer-ს
+    პრობლემა არ ჰქონდეს.
+  */
+
   const callbackName =
-    'PG_CALLBACK_' +
+    'pgCallback' +
     Date.now() +
-    '_' +
     Math.floor(
       Math.random() * 1000000
     );
@@ -1583,35 +1591,55 @@ function callApi(
       'script'
     );
 
+  script.type =
+    'text/javascript';
+
+  script.async = true;
+
 
   let finished = false;
+
+
+  function finish(result) {
+
+    if (finished) {
+      return;
+    }
+
+    finished = true;
+
+
+    try {
+
+      callback(
+        result
+      );
+
+    } finally {
+
+      try {
+        delete window[
+          callbackName
+        ];
+      } catch (e) {}
+
+      if (script.parentNode) {
+        script.parentNode.removeChild(
+          script
+        );
+      }
+
+    }
+
+  }
 
 
   window[callbackName] =
     function(result) {
 
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-
-
-      try {
-
-        callback(
-          result
-        );
-
-      } finally {
-
-        delete window[
-          callbackName
-        ];
-
-        script.remove();
-
-      }
+      finish(
+        result
+      );
 
     };
 
@@ -1619,27 +1647,12 @@ function callApi(
   script.onerror =
     function() {
 
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-
-
-      delete window[
-        callbackName
-      ];
-
-
-      script.remove();
-
-
-      callback({
+      finish({
 
         success: false,
 
         message:
-          'Google Sheets-თან დაკავშირება ვერ მოხერხდა.'
+          'Apps Script API-სთან კავშირი ვერ მოხერხდა. გადაამოწმე Web App Deployment.'
 
       });
 
@@ -1654,15 +1667,20 @@ function callApi(
     );
 
 
+  /*
+    Head-ში ვამატებთ, როგორც ნამდვილ JSONP
+    script request-ს.
+  */
+
   document
-    .body
+    .head
     .appendChild(
       script
     );
 
 
   /*
-    20 წამიანი timeout
+    20 წამიანი timeout.
   */
 
   setTimeout(
@@ -1672,18 +1690,7 @@ function callApi(
         return;
       }
 
-      finished = true;
-
-
-      delete window[
-        callbackName
-      ];
-
-
-      script.remove();
-
-
-      callback({
+      finish({
 
         success: false,
 
