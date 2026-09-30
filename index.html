@@ -529,27 +529,59 @@ async function startScanner() {
     }
 
 
-    scanner =
-      new Html5Qrcode(
-        'reader'
-      );
+    scanner = new Html5Qrcode('reader', {
+      verbose: false
+    });
 
 
     await scanner.start(
 
       {
-        facingMode: 'environment'
+        facingMode: {
+          ideal: 'environment'
+        }
       },
 
       {
-        fps: 10,
+        // უფრო ხშირი სკანირება
+        fps: 20,
 
-        qrbox: {
-          width: 250,
-          height: 250
+        // მაქსიმალურად მაღალი კამერის ხარისხი, როცა მოწყობილობა იძლევა საშუალებას
+        videoConstraints: {
+          facingMode: {
+            ideal: 'environment'
+          },
+          width: {
+            ideal: 1920
+          },
+          height: {
+            ideal: 1080
+          }
         },
 
-        aspectRatio: 1
+        // QR-ის მოსაძებნად კამერის გამოსახულების დიდი ნაწილი გამოიყენება
+        qrbox: function(viewfinderWidth, viewfinderHeight) {
+
+          const minEdge = Math.min(
+            viewfinderWidth,
+            viewfinderHeight
+          );
+
+          const size = Math.floor(
+            minEdge * 0.88
+          );
+
+          return {
+            width: size,
+            height: size
+          };
+        },
+
+        // კამერის პროპორციების მორგება
+        aspectRatio: 1.7777778,
+
+        // სარკისებური გამოსახულების გარეშე
+        disableFlip: false
 
       },
 
